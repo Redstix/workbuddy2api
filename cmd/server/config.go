@@ -181,6 +181,11 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// FoldSystemMessages 出站前把 system/developer 折叠进第一条 user（默认 false）。
+		// 上游只转发 user/assistant，role=system 被静默丢弃——客户端写在 system 里的
+		// 约定（项目规范、输出契约）在上游侧等于不存在。开启后这些文本以 user 身份
+		// 送达，指令不再丢失；代价是请求里不再有 system 消息。
+		FoldSystemMessages bool `json:"fold_system_messages"`
 	} `json:"features"`
 
 	Prompt struct {
@@ -401,6 +406,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
+		}
+	}
+	if v := os.Getenv("WB2A_FOLD_SYSTEM_MESSAGES"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Features.FoldSystemMessages = b
 		}
 	}
 	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {

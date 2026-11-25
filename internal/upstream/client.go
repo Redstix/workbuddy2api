@@ -677,6 +677,15 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	SanitizeFingerprints bool
 
+	// FoldSystemMessages 出站前把 system/developer 消息折叠进第一条 user 消息
+	// （features.fold_system_messages，默认 false）。
+	//
+	// 上游只转发 user/assistant 内容，role=system 被静默丢弃（见 fold.go 文件头实测），
+	// 客户端写在 system 里的约定在上游侧等于不存在。开启后 system/developer 文本
+	// 按原顺序前置合并进首条 user 消息，指令不再丢失。与 prompt.mode 正交：
+	// mode 决定用哪段提示词，本开关决定系统提示词以什么角色送出。
+	FoldSystemMessages bool
+
 	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认 WorkBuddy
 	// 三段式与 billingUA 单段式）。空 = 默认官方形态：chat/refresh/FetchModels 走
 	// `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<cliVer>`；billing/checkin 走 `WorkBuddy/<ver>`
@@ -1077,6 +1086,15 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
+	}
+	// system/developer 折叠（features.fold_system_messages，默认关）：上游只转发
+	// user/assistant，role=system 被静默丢弃（见 fold.go 文件头实测）。放在
+	// ensureConsoleSystem 之后——否则 global 域刚补的兜底 system 又会被上游丢掉，
+	// 折叠后该兜底文本随首条 user 一起送达。
+	// 位置在 prepareBody 之后、轮转循环之前：一次请求只折叠一次，换号重试复用
+	// 同一份 prepared，不重复叠加。
+	if c.FoldSystemMessages {
+		prepared = FoldSystemMessages(prepared)
 	}
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部

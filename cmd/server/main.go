@@ -208,6 +208,7 @@ func main() {
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	up.FoldSystemMessages = cfg.Features.FoldSystemMessages
 	// 出站 UA（A 段）：非空才做显式覆盖，空 = 默认 WorkBuddy 三段式
 	// `WorkBuddy/<client_version> WorkBuddy/<client_version> CLI/<cli_version>`。
 	up.UserAgent = cfg.Upstream.UserAgent

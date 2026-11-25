@@ -85,6 +85,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
   - `custom`：网关用自有提示词**替换**客户端 system/developer（从源头消除模板句误报；不参与降级）
   - `append`：**两者并用**——开头连续 system/developer 块之后插入网关自有提示词，客户端项目规范/工具约定与网关人格共存（issue #129）；降级期与拦截首遇重试时退化为 `custom` 语义（换中性提示词，原文 system 移除）
   - `prompt.file`（custom/append 生效）指向自定义提示词文件，空 = 内置默认
+- **system 折叠**（`features.fold_system_messages`，缺省 `false`）— 上游只转发 user/assistant 内容，**role=system 的消息被静默丢弃**（1 百到 2.4 万字符各档实测均不可见，同内容放进 user 立即可见；role=developer 同样）。开启后出站前把 system/developer 的文本按原顺序拼接，前置合并进**首条** user 消息，这些消息本身被删除——客户端写在 system 里的项目规范、工具约定、输出契约（如 OpenViking 的提取 DSL）得以真正送达上游。与 `prompt.mode` **正交**：mode 决定用哪段提示词（透传/替换/追加），本开关决定提示词以什么角色送出；三种 mode 与降级重试都可叠加。多模态 user 消息会在头部插入一个 `text` 分区，图片等既有分区原位保留。无 user 消息时在最前插入一条 user 承载；无可折叠文本时为纯 no-op（字节级原样返回）
 - **会话头族注入** — 出站携带官方客户端会话头族（`X-Conversation-Request-ID` 聚合主键 · `X-Conversation-ID` 透传，客户端缺省会话 ID 时用轮级聚合键兜底合成、**该头恒发**（上游渠道校验要求，缺头会被判非官方客户端并拒收，见 #36） · B3 链路），轮转 / 重试 / 路径回退复用同键，后台按对话轮聚合不再碎片化（issue #35）
 - **指纹脱敏** — 出站请求体黑名单指纹字段清洗（可开关），与提示词体系两层叠加
 
@@ -172,7 +173,7 @@ flowchart LR
     U -->|"billing / auth / growth"| CB
 ```
 
-上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
+上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏；`features.fold_system_messages` 开启时再叠加 system/developer 折叠（`internal/upstream/fold.go`，上游不认 system 角色，见「请求链路」）。
 
 ## 快速开始
 

@@ -84,7 +84,8 @@
     "passthrough_ip": false
   },
   "features": {
-    "sanitize_blacklist_fingerprints": true
+    "sanitize_blacklist_fingerprints": true,
+    "fold_system_messages": false
   },
   "prompt": {
     "mode": "passthrough",
