@@ -198,9 +198,11 @@ type Config struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
 		// FoldSystemMessages 出站前把 system/developer 折叠进第一条 user（默认 false）。
-		// 上游只转发 user/assistant，role=system 被静默丢弃——客户端写在 system 里的
-		// 约定（项目规范、输出契约）在上游侧等于不存在。开启后这些文本以 user 身份
-		// 送达，指令不再丢失；代价是请求里不再有 system 消息。
+		// ⚠️ 已废弃，勿开启：折叠排在 ensureConsoleSystem 之后，会把 global 域刚补的
+		// 兜底 system 又删掉，上游必然返回 11-128 "first message is not system prompt"。
+		// 原设计前提（「上游丢弃 system」）经实测为误判——真因是内容拦截触发的降级门
+		// 把 system 整体替换成中性提示词（见 internal/server/degrade.go 与
+		// internal/upstream/fold.go 文件头的更正说明）。
 		FoldSystemMessages bool `json:"fold_system_messages"`
 	} `json:"features"`
 

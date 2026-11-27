@@ -680,10 +680,10 @@ type Client struct {
 	// FoldSystemMessages 出站前把 system/developer 消息折叠进第一条 user 消息
 	// （features.fold_system_messages，默认 false）。
 	//
-	// 上游只转发 user/assistant 内容，role=system 被静默丢弃（见 fold.go 文件头实测），
-	// 客户端写在 system 里的约定在上游侧等于不存在。开启后 system/developer 文本
-	// 按原顺序前置合并进首条 user 消息，指令不再丢失。与 prompt.mode 正交：
-	// mode 决定用哪段提示词，本开关决定系统提示词以什么角色送出。
+	// ⚠️ 已废弃，勿开启：折叠在 ensureConsoleSystem 之后执行，会把 global 域刚补上的
+	// 兜底 system 又删掉，上游必然返回 11-128 "first message is not system prompt"。
+	// 原注释「上游只转发 user/assistant，system 被静默丢弃」的前提经实测为误判——
+	// 真因是降级门整体替换 system（见 fold.go 文件头更正）。
 	FoldSystemMessages bool
 
 	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认 WorkBuddy
@@ -1108,10 +1108,12 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}
-	// system/developer 折叠（features.fold_system_messages，默认关）：上游只转发
-	// user/assistant，role=system 被静默丢弃（见 fold.go 文件头实测）。放在
-	// ensureConsoleSystem 之后——否则 global 域刚补的兜底 system 又会被上游丢掉，
-	// 折叠后该兜底文本随首条 user 一起送达。
+	// system/developer 折叠（features.fold_system_messages，默认关，**已废弃勿开**）：
+	// 开启必然失败——本行紧随 ensureConsoleSystem，把刚补上的兜底 system 又删掉，
+	// global 域立刻返回 {"code":"11-128","msg":"first message is not system prompt"}。
+	// 原注释「上游丢弃 system，折叠后兜底文本随首条 user 送达」的前提已被实测推翻，
+	// 真实成因是降级门整体替换 system（见 fold.go 文件头更正）。开关保持 false，
+	// 这段等于死代码；留着只为不改动运行路径与测试。
 	// 位置在 prepareBody 之后、轮转循环之前：一次请求只折叠一次，换号重试复用
 	// 同一份 prepared，不重复叠加。
 	if c.FoldSystemMessages {

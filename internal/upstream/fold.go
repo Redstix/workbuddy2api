@@ -1,5 +1,26 @@
 // fold.go 把 system/developer 消息折叠进 user 消息（features.fold_system_messages）。
 //
+// ⚠️ 本功能已废弃，勿开启（features.fold_system_messages 恒为 false）。开启会必然失败：
+// 折叠排在 ensureConsoleSystem 之后（见 client.go ChatStreamContext），后者刚给 global
+// 域补上的兜底 system 会被 FoldSystemMessages 紧接着删掉，上游立刻返回
+// {"code":"11-128","msg":"first message is not system prompt"}。即「先补后删」。
+//
+// 下面这段「上游丢弃 system」的背景**已被实测推翻**，保留原文仅供追溯，不要据它
+// 判断行为：
+//
+//   - 真正的机制是降级门（internal/server/degrade.go）：内容被拦一次 → degrade.Trigger()
+//     → 到次日 00:00 CST 前所有请求的 system 被 prompt.Rewrite(body, prompt.Degraded)
+//     整体替换成那句中性提示词。现象（system 里的指令「看不见」）与「被丢弃」一样，
+//     成因相反——所以当年的实测极可能是在降级状态下做的，把「被替换」误判成「被丢弃」。
+//   - 上游要求首条必须是 system：ensureConsoleSystem 的存在本身就是这条要求的证据，
+//     而 fold 恰好把 system 删光。
+//
+// 保留代码而不删除的原因：折叠逻辑本身（messageText/mergeIntoContent/顺序合并）是
+// 正确且测试完备的，将来若上游真的不认 system 角色，它仍是可复用的底座；删掉则要
+// 连测试一起重写。开关保持默认关，等于死代码，不影响任何运行路径。
+//
+// —— 以下为原始（已过时的）设计说明 ——
+//
 // 背景：WorkBuddy 上游（CN /v2 与 global 同源）只转发 user/assistant 内容，
 // **role=system 的消息被静默丢弃**——实测同一段 markdown 标记文本放进 system
 // 时模型完全看不见（1 百到 2.4 万字符各档长度均不可见），同内容放进 user
@@ -96,6 +117,9 @@ func mergeIntoContent(content any, block string) any {
 }
 
 // FoldSystemMessages 把 messages 中所有 system/developer 的文本折叠进第一条 user 消息。
+//
+// ⚠️ 调用方注意：不要在 ensureConsoleSystem 之后调用（见文件头）。global 域会因此
+// 返回 11-128，本功能已废弃。
 //
 // 行为（对齐已验证的代理实现）：
 //   - 折叠顺序 = 原消息顺序，块间以空行分隔；
