@@ -234,8 +234,10 @@ curl -s http://localhost:7863/healthz
 > **Go 模块代理**：镜像构建第一步是 `go mod download`，官方 `proxy.golang.org` 在中国
 > 大陆不可达（表现为长时间停在这一层，看着像构建挂了）。因此 `Dockerfile` 的默认值就是
 > 国内代理 `https://goproxy.cn,direct`，**国内直接 `docker compose up -d --build` 即可，
-> 无需额外参数**。同时关闭了 `GOSUMDB`（goproxy.cn 不代理 `sum.golang.org`；模块完整性
-> 仍由仓库内 `go.sum` 的哈希校验保证）。
+> 无需额外参数**。同时关闭了 `GOSUMDB`，只是顺手省掉一次额外往返 —— goproxy.cn 其实
+> **会**代理 `sum.golang.org`（实测 `GET https://goproxy.cn/sumdb/sum.golang.org/supported`
+> 返回 200，sumdb 请求全通），所以这不是「不得不关」。模块完整性仍由仓库内 `go.sum` 的
+> 哈希校验保证。
 >
 > 海外/CI 环境想换回官方代理，覆盖 build args 即可：
 >

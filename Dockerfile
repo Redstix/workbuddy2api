@@ -8,9 +8,11 @@ WORKDIR /src
 # 变成「直连 VCS」，而是回落到 Go 自带的 GOROOT/go.env 默认（proxy.golang.org,direct）——
 # 也就是又变回国内不可达。所以覆盖时请给实际值，别给空。
 ARG GOPROXY=https://goproxy.cn,direct
-# GOSUMDB=off：省掉向 sum.golang.org 取校验记录这一步（每模块一次额外往返，国内常被拖慢
-# 或卡住）。模块内容完整性不受影响 —— go.sum 已钉住全部依赖，go mod download 仍逐个校验
-# 哈希（失败即报 checksum mismatch），GOSUMDB 只影响「新模块首次入 go.sum」这一场景。
+# GOSUMDB=off：顺手省掉向 sum.golang.org 取校验记录这一步（每模块一次额外往返）。注意这不
+# 是「不得不关」—— 实测 GOSUMDB=sum.golang.org 配 GOPROXY=https://goproxy.cn 时
+# goproxy.cn 会代理 sumdb（GET /sumdb/sum.golang.org/supported 返回 200），校验是通的。
+# 关掉只是省一跳。模块内容完整性不受影响 —— go.sum 已钉住全部依赖，go mod download 仍逐个
+# 校验哈希（失败即报 checksum mismatch），GOSUMDB 只影响「新模块首次入 go.sum」这一场景。
 # 需要恢复校验库校验时覆盖：--build-arg GOSUMDB=sum.golang.org
 ARG GOSUMDB=off
 ENV GOPROXY=${GOPROXY} \
