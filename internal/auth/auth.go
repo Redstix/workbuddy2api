@@ -60,6 +60,54 @@ type Auth struct {
 	// *Auth 指针，而不是改这个字段），故不纳入 a.mu 保护 —— 与 realm 不同
 	// （realm 会被 RefreshToken 在锁内改写）。
 	Groups []string
+
+	// ProxyAddr 该账号绑定的**出站代理**地址（本地 mihomo listener，如
+	// http://127.0.0.1:17891），落盘于文件**顶层** proxy_addr 键（与 groups 同位置）。
+	//
+	// 空 = 直连。只有 global realm 账号才会真正启用它（见 OutboundProxyAddr）：
+	// 国内账号必须直连——它们走国内上游，绕海外节点只会把 IP 变成可疑来源。
+	//
+	// 一个账号一个固定端口：节点切换/区域回退/测活全是 mihomo 容器内部的事，
+	// 网关只认这个固定地址，不做任何节点选择逻辑。
+	//
+	// 并发：与 Groups 同性质——仅 Parse/LoadDir 赋值一次，之后整个生命周期只读
+	// （热加载换的是新的 *Auth 指针），故不纳入 a.mu；跨包读一律走 ProxyAddrValue /
+	// OutboundProxyAddr。
+	ProxyAddr string
+
+	// ProxyNode / ProxyRegion 该账号当前落在哪个节点/区域，**仅供观测与运维对账**，
+	// 不参与任何路由决策（网关不知道也不该知道 mihomo 内部选了哪条线）。
+	// 落盘于顶层 proxy_node / proxy_region。
+	ProxyNode   string
+	ProxyRegion string
+}
+
+// ProxyAddrValue 返回账号绑定的出站代理地址（去首尾空白）；空 = 直连。
+// 只做规范化，**不做 realm 闸门**——闸门统一在 OutboundProxyAddr 里。
+func (a *Auth) ProxyAddrValue() string {
+	if a == nil {
+		return ""
+	}
+	return strings.TrimSpace(a.ProxyAddr)
+}
+
+// OutboundProxyAddr 返回该账号**实际应使用**的出站代理地址，realm 闸门在这里唯一实现：
+//
+//	global 且有 proxy_addr → 该地址（走代理）
+//	cn                    → ""（永远直连，即使配置里写了 proxy_addr 也忽略）
+//	global 但无 proxy_addr → ""（直连：还没分配节点）
+//
+// 为什么闸门收在这里而不是散在调用方：出站点有三十多个（doJSON / chat / models /
+// global_models），任何一处漏判都会让 cn 账号偷偷走海外节点。唯一入口 = 唯一正确。
+// 另外 Realm() 已内含 globalEnabled 逃生门（纯 CN 部署恒判 cn），所以这里不必重复判断。
+func (a *Auth) OutboundProxyAddr() string {
+	if a == nil {
+		return ""
+	}
+	if !a.IsGlobal() {
+		return ""
+	}
+	return a.ProxyAddrValue()
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -348,6 +396,10 @@ func Parse(raw []byte) (*Auth, error) {
 			DeviceToken string `json:"device_token"`
 			// Groups 顶层 groups（嵌套形与扁平形共用）：账号业务分组标签。
 			Groups []string `json:"groups"`
+			// 账号级出站代理（嵌套形与扁平形共用，位置同 groups/device_token）。
+			ProxyAddr   string `json:"proxy_addr"`
+			ProxyNode   string `json:"proxy_node"`
+			ProxyRegion string `json:"proxy_region"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -363,6 +415,9 @@ func Parse(raw []byte) (*Auth, error) {
 			Nickname:     n.Account.Nickname,
 			DeviceToken:  n.DeviceToken,
 			Groups:       normalizeGroups(n.Groups),
+			ProxyAddr:    strings.TrimSpace(n.ProxyAddr),
+			ProxyNode:    strings.TrimSpace(n.ProxyNode),
+			ProxyRegion:  strings.TrimSpace(n.ProxyRegion),
 		}
 	} else {
 		var f struct {
@@ -376,6 +431,9 @@ func Parse(raw []byte) (*Auth, error) {
 			Nickname     string   `json:"nickname"`
 			DeviceToken  string   `json:"device_token"`
 			Groups       []string `json:"groups"`
+			ProxyAddr    string   `json:"proxy_addr"`
+			ProxyNode    string   `json:"proxy_node"`
+			ProxyRegion  string   `json:"proxy_region"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -391,6 +449,9 @@ func Parse(raw []byte) (*Auth, error) {
 			Nickname:     f.Nickname,
 			DeviceToken:  f.DeviceToken,
 			Groups:       normalizeGroups(f.Groups),
+			ProxyAddr:    strings.TrimSpace(f.ProxyAddr),
+			ProxyNode:    strings.TrimSpace(f.ProxyNode),
+			ProxyRegion:  strings.TrimSpace(f.ProxyRegion),
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -438,6 +499,23 @@ func (a *Auth) SaveAtomic() error {
 	// 忽略 → 表现为"某分组突然无号可用"，但文件里看不到任何报错。
 	if len(a.Groups) > 0 {
 		doc["groups"] = a.Groups
+	}
+	// ProxyAddr / ProxyNode / ProxyRegion 同上策略：非空才写回顶层，不污染旧文件。
+	//
+	// ★ 同样必须写回 ★ 理由与 groups 完全一致，但后果更隐蔽：proxy_addr 掉了之后
+	// 账号**不会报错**，只是静默地退回直连——一个本该走海外节点的 global 账号开始
+	// 用机房 IP 打上游，风控逐步收紧，等到 403 才发现时已经很难回溯到"是某次 token
+	// 刷新把代理地址吃掉了"。而 SaveAtomic 走的是 token 刷新这条高频路径，漏写必然
+	// 迟早发生。proxy_node / proxy_region 是纯观测字段，丢了不影响路由，但一并保留
+	// 才能让运维对账时看到的值和文件里的值一致。
+	if a.ProxyAddr != "" {
+		doc["proxy_addr"] = a.ProxyAddr
+	}
+	if a.ProxyNode != "" {
+		doc["proxy_node"] = a.ProxyNode
+	}
+	if a.ProxyRegion != "" {
+		doc["proxy_region"] = a.ProxyRegion
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

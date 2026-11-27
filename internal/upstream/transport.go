@@ -7,8 +7,10 @@ package upstream
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -71,9 +73,56 @@ func newDialer() *net.Dialer {
 //     完成后无 h2 协议可用，连接退回 HTTP/1.1）。
 //   - TCP 层：DialContext 10s 建连上限 + 15s keepalive 探测，半开连接在建立期
 //     和复用期都能被快速识别（见 dialTimeout/dialKeepAlive 注释）。
+//
+// Proxy 显式留空（nil）：Go 在 Proxy 为 nil 时**不读** HTTP_PROXY/HTTPS_PROXY
+// 环境变量，因此直连 client 不会被进程级代理意外劫持。要走代理必须显式给
+// newTransportForProxy —— 这条「进程环境变量永远不生效」的性质是账号级代理
+// 隔离的前提：一个账号一个固定 listener，绝不会因为运维 export 了 HTTPS_PROXY
+// 就把所有账号塞进同一个出口。
 func newTransport() *http.Transport {
+	return newTransportWithProxy(nil)
+}
+
+// newTransportForProxy 构造**绑定单个代理出口**的出站 Transport。
+//
+// 除 Proxy 字段外，其余全部参数与 newTransport() 逐字一致（同一套连接层加固：
+// 10s 建连 / 15s keepalive / 禁 h2 / 30s 空闲 / 60s 首包 / 100+20 池），所以
+// 走代理的账号与直连账号在超时、连接复用、h2 禁用上没有任何行为差异——代理只
+// 换出口 IP，不改协议栈。这里刻意做成「同一构造函数 + 一个可选 Proxy」，而不是
+// 复制一份 Transport 字面量：复制迟早会漂移（改一处忘另一处），而漂移的后果是
+// 某一类账号悄悄失去半死连接防护。
+//
+// proxyAddr 形如 http://127.0.0.1:17891（本地 mihomo listener）。解析失败直接
+// 返回 error、由调用方 fail 掉该请求——绝不静默回落直连：一个本该走海外节点的
+// global 账号突然用机房 IP 打上游，比请求失败危险得多（风控是渐进的，等 403
+// 时已很难归因）。socks5 等 scheme 由 http.ProxyURL 支持的 Transport 处理。
+func newTransportForProxy(proxyAddr string) (*http.Transport, error) {
+	u, err := url.Parse(proxyAddr)
+	if err != nil {
+		return nil, fmt.Errorf("parse proxy addr %q: %w", proxyAddr, err)
+	}
+	if u.Host == "" {
+		// url.Parse 对 "127.0.0.1:17891"（缺 scheme）这类写法不报错但 Host 为空，
+		// 会构造出一个连不上任何地方的代理，症状是全部请求超时而非明确报错。
+		// 这里直接拒绝，逼配置写成完整 URL。
+		return nil, fmt.Errorf("proxy addr %q has no host (want scheme://host:port)", proxyAddr)
+	}
+	return newTransportWithProxy(u), nil
+}
+
+// newTransportWithProxy 是两条构造路径的唯一实现：proxy 为 nil 即直连。
+func newTransportWithProxy(proxy *url.URL) *http.Transport {
 	dialer := newDialer()
+	// Proxy 为 nil 时标准库不读环境变量（见 newTransport 注释）；非 nil 时所有请求
+	// 固定走这个出口，与 HTTP_PROXY/HTTPS_PROXY/NO_PROXY 完全无关。
+	// 直连分支刻意保持 Proxy==nil（而不是 http.ProxyURL(nil) 那种「非 nil 但返回
+	// nil」的写法）：语义上「没有代理」就该是 nil，让任何回读断言一眼看得出。
+	var proxyFn func(*http.Request) (*url.URL, error)
+	if proxy != nil {
+		proxyFn = http.ProxyURL(proxy)
+	}
 	return &http.Transport{
+		Proxy:       proxyFn,
 		DialContext: dialer.DialContext,
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设

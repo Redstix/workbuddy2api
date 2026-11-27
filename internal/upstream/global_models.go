@@ -312,7 +312,12 @@ func (c *Client) globalModelsOnce(a *auth.Auth, path string) ([]string, []ModelI
 	}
 	c.CommonHeaders(req, a) // 共享请求头（Origin/Referer/UA），与 FetchModels 同款
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	hc, err := c.clientFor(a)
+	if err != nil {
+		logProxyDown(a, err)
+		return nil, nil, nil, nil, err
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

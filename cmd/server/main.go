@@ -226,6 +226,9 @@ func main() {
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	up.GlobalEnabled = cfg.Global.Enabled
+	// 账号级出站代理的失败策略（config proxy.on_failure，已 normalize 成 block/direct）。
+	// 账号绑定哪个地址在 auth 文件里（proxy_addr），不在这里配置。
+	up.ProxyOnFailure = cfg.Proxy.OnFailure
 
 	// 签到历史落盘（GET /v1/checkin/history 的数据源）。此前签到结果只活在
 	// POST /v1/checkin 的 HTTP 响应里——刷新页面即失忆，自动 9/21 那趟更是完全

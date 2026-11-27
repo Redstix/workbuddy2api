@@ -140,6 +140,22 @@ type Config struct {
 		BillingBase string `json:"billing_base"`
 	} `json:"global"`
 
+	// Proxy 账号级出站代理的全局策略（账号绑定本身在 auth 文件里：proxy_addr）。
+	//
+	// 本段只放「所有账号共用」的策略，不重复账号级配置——一个账号走哪个地址是
+	// 那个账号自己的属性（auth.Auth.ProxyAddr），改它不该动全局配置。
+	Proxy struct {
+		// OnFailure 代理不可用时的行为。
+		//
+		// "block"（默认）：该账号的请求直接失败。这是唯一安全的默认——一个本该走
+		// 海外住宅 IP 的 global 账号静默退回机房直连，会立刻在上游留下「同一机房
+		// IP 多账号」特征，而风控是渐进的，等从 403 里发现时已很难回溯。
+		//
+		// "direct"：退回直连。**仅供调试**（本地没起 mihomo 想跑通链路时用）。
+		// 用它就意味着接受上面那段风险，normalize 会在启动日志里显式警告。
+		OnFailure string `json:"on_failure"` // "block" / "direct"
+	} `json:"proxy"`
+
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
 		TimeoutSeconds int `json:"timeout_seconds"`
@@ -282,6 +298,8 @@ func Default() *Config {
 	// 显式 client_name="SaaS" 还原旧行为。
 	c.Upstream.ClientName = "WorkBuddy"
 	c.Features.SanitizeBlacklistFingerprints = true
+	// 代理失败默认 block（绝不静默改出口），见 Config.Proxy.OnFailure 注释。
+	c.Proxy.OnFailure = "block"
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：默认透传客户端原始 system；显式配置 custom 仍可覆盖回替换
 	c.Pool.MaxInFlight = 3
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403
@@ -407,6 +425,9 @@ func applyEnv(c *Config) {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
 		}
+	}
+	if v := os.Getenv("WB2A_PROXY_ON_FAILURE"); v != "" {
+		c.Proxy.OnFailure = v
 	}
 	if v := os.Getenv("WB2A_FOLD_SYSTEM_MESSAGES"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -644,7 +665,30 @@ func (c *Config) normalize() error {
 	if err := c.normalizeAPIKeys(); err != nil {
 		return err
 	}
+	if err := c.normalizeProxy(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
+}
+
+// normalizeProxy 归一 proxy 段。
+//
+// 只有两个合法取值，其余一律 fail-fast：代理失败策略直接决定「一个 global 账号
+// 会不会悄悄用机房 IP 打上游」，配置写错（比如拼成 "blocked"、"Direct "）时必须
+// 当场拒绝启动，而不是静默按某个默认值跑——按默认 block 跑是安全的，但运维以为
+// 自己配的是 direct，排障时会找不到原因；按 direct 跑则直接把风控暴露出去。
+func (c *Config) normalizeProxy() error {
+	v := strings.ToLower(strings.TrimSpace(c.Proxy.OnFailure))
+	switch v {
+	case "":
+		// 空 = 未设置 → 默认 block（绝不静默改出口）。
+		c.Proxy.OnFailure = "block"
+	case "block", "direct":
+		c.Proxy.OnFailure = v
+	default:
+		return fmt.Errorf("proxy.on_failure: %q 非法，只接受 \"block\"（默认，失败即失败）或 \"direct\"（仅调试：代理挂了退回直连）", c.Proxy.OnFailure)
+	}
+	return nil
 }
 
 // normalizeAlerting 归一并校验 alerting 段。

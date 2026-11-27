@@ -122,6 +122,29 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 - 共享同一账号池，由账号 `realm` 或请求模型名前缀（`cn:` / `global:`）决定路由；`global.enabled` 可一键锁死纯 CN 部署
 - 国际版支持注册激活、地区完善、一次性 trial 加油包领取（`./trial.sh`）
 
+#### 账号级出站代理（`proxy_addr`）
+
+国际版账号全部从同一台机房出口访问时，上游会按「同 IP 多账号」特征收紧风控（先是 403，再是全域降级）。可以给**单个 global 账号**绑定一个本地代理 listener，让它的出站走住宅/海外节点：
+
+```json
+{
+  "auth": {"accessToken": "...", "refreshToken": "...", "expiresAt": 0,
+           "domain": "www.workbuddy.ai", "realm": "global"},
+  "account": {"uid": "...", "nickname": "..."},
+  "proxy_addr": "http://127.0.0.1:17891",
+  "proxy_node": "hk-01",
+  "proxy_region": "HK"
+}
+```
+
+- `proxy_addr` 只对 **global realm** 账号生效；CN 账号即使写了也走直连（把国内账号的出口挪到海外节点等于给风控送特征）。`proxy_node` / `proxy_region` 是纯观测字段，供排障对账，不参与路由
+- 同一个 `proxy_addr` 的账号共享一个连接池；地址不同则各自独立。代理只换出口 IP，协议栈参数（禁 h2、首字节超时、连接池容量）与直连完全一致
+- 地址必须带 scheme（`http://host:port`）。写错会**明确报错**而不是静默直连——静默改出口是这里最危险的行为
+- 代理不可达时该账号请求直接失败（`proxy.on_failure` 默认 `"block"`）。设成 `"direct"` 会让它在代理挂掉时退回直连，**仅供调试**：那会让一个本该走住宅 IP 的账号突然用机房 IP 打上游，而风控是渐进的，等从 403 里发现时已经很难回溯
+- 服务端不会自己拉起/切换代理节点：listener 由外部（mihomo 等）维护，本项目只负责「按账号选出口」
+
+> 代理挂了不会自动降级到直连，这是刻意的。需要「宁可少一个号也不换出口身份」的语义。
+
 ### 辅助工具
 
 - 积分日报：`./credit.sh`（美化 / `-json`，realm 感知双域）

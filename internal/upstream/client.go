@@ -738,6 +738,18 @@ type Client struct {
 	// false 即显式逃生门：即使用户 auth 写了 realm=global 也**不**路由到 global base——
 	// chatBase/billingBase 返回 CN base，路径也走 CN（双保险，与 auth.Realm() 的开关闸呼应）。
 	GlobalEnabled bool
+
+	// ProxyOnFailure 代理不可用时的行为（config proxy.on_failure）：
+	// "block"（默认）该账号请求直接失败；"direct" 退回直连（**仅调试**，见 proxy.go）。
+	ProxyOnFailure string
+
+	// proxyMu/proxyClients 账号级代理 client 池：代理地址 → 该出口的 client 对。
+	//
+	// 键是地址字符串本身：同地址账号共享连接池（同一个 listener 就该共用），不同
+	// 地址各自独立。懒构造（首次用到才建）：auth 目录热加载随时可能新增账号，
+	// 启动时全量枚举会漏掉后加的。构造只发生一次，之后全是读，故 RWMutex 足够。
+	proxyMu      sync.RWMutex
+	proxyClients map[string]*proxyClient
 }
 
 // New 生产默认值。Transport 由 newTransport() 集中构造（连接层加固：禁 h2 /
@@ -919,8 +931,17 @@ func (c *Client) checkinMeterPaths(a *auth.Auth) []string {
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
-func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := c.HTTP.Do(req)
+//
+// a 决定出口（见 proxy.go）：cn 账号与未分配代理的 global 账号走 c.HTTP 直连，
+// 有代理的 global 账号走它自己的 listener。代理构造失败时按 proxy.on_failure
+// 处理——默认 block（返回错误，绝不静默改出口）。
+func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error) {
+	hc, err := c.clientFor(a)
+	if err != nil {
+		logProxyDown(a, err)
+		return nil, err
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1000,7 +1021,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	c.RefreshHeaders(req, &hdrSnapshot)
 
 	// 网络 I/O（锁外，30s 上限）。
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(a, req)
 	if err != nil {
 		return err
 	}
@@ -1099,6 +1120,15 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部
 	// 不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
+	// 本账号的聊天 client（按出口解析一次，整个轮转循环复用）：cn 账号与未分配代理的
+	// global 账号 = c.chatHTTP() 直连；有代理的 global 账号 = 它自己 listener 上的 client。
+	// 在循环外解析而不是每个 path 解析一次：同一请求的所有候选路径必须走同一个出口，
+	// 否则「第一个路径走代理、第二个路径直连」会让上游看到同一账号两个 IP。
+	hc, err := c.chatClientFor(a)
+	if err != nil {
+		logProxyDown(a, err)
+		return nil, 0, nil, err
+	}
 	for _, path := range c.chatPaths(a) {
 		url := c.chatBase(a) + path
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(prepared))
@@ -1110,14 +1140,16 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
-		resp, err := c.chatHTTP().Do(req)
+		resp, err := hc.Do(req)
 		if err != nil {
 			cancel()
-			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
-			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固第 5 件）：
+			log.Printf("ERR: [upstream] chat_stream acct=%s proxy=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), proxyLabel(a), err)
+			// 传输层失败 → 清空**该出口**连接池的空闲连接（连接层加固第 5 件）：
 			// 失败连接可能仍留在空闲池里，下一个请求会继续捡到它（kongjianguan
-			// 实测：仅靠 IdleConnTimeout 等过期不够，主动清池才断根）。
-			roundTripCloseIdle(c.chatHTTP().Transport)
+			// 实测：仅靠 IdleConnTimeout 等过期不够，主动清池才断根）。清的是
+			// hc.Transport 而不是 c.chatHTTP()——代理出口与直连各有各的池，清错
+			// 了对象等于没清（池里那些死连接还在）。
+			roundTripCloseIdle(hc.Transport)
 			return nil, 0, nil, err
 		}
 		if resp.StatusCode >= 400 {
@@ -1386,7 +1418,12 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	hc, err := c.clientFor(a)
+	if err != nil {
+		logProxyDown(a, err)
+		return nil, err
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1466,7 +1503,12 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	// （Bearer + web UA → 400 code 12403，见 global-models-missing.md）。
 	c.CommonHeaders(req, a)
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	hc, err := c.clientFor(a)
+	if err != nil {
+		logProxyDown(a, err)
+		return nil, err
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}

@@ -71,6 +71,9 @@
     "chat_base": "",
     "billing_base": ""
   },
+  "proxy": {
+    "on_failure": "block"
+  },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
