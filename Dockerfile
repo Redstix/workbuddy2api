@@ -1,13 +1,24 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.26-alpine AS build
 WORKDIR /src
-# 可选：Go 模块代理。官方 proxy.golang.org 在中国大陆不可达（go mod download
-# 会卡死）；国内机器构建时传 --build-arg GOPROXY=https://goproxy.cn,direct。
-# 留空 = 官方默认，行为与上游原版一致。
-ARG GOPROXY=""
-RUN test -z "${GOPROXY}" || go env -w GOPROXY="${GOPROXY}"
-COPY go.mod ./
-RUN go mod download
+# Go 模块代理：默认走国内代理。官方 proxy.golang.org 在中国大陆不可达，go mod download
+# 会长时间卡在这一层（看着像构建挂了）。海外/CI 构建可覆盖回官方：
+#   --build-arg GOPROXY=https://proxy.golang.org,direct
+# 用 ARG + ENV 而不是直接 ENV：ARG 可被 --build-arg 覆盖。注意传空值（GOPROXY=）不会
+# 变成「直连 VCS」，而是回落到 Go 自带的 GOROOT/go.env 默认（proxy.golang.org,direct）——
+# 也就是又变回国内不可达。所以覆盖时请给实际值，别给空。
+ARG GOPROXY=https://goproxy.cn,direct
+# GOSUMDB=off：省掉向 sum.golang.org 取校验记录这一步（每模块一次额外往返，国内常被拖慢
+# 或卡住）。模块内容完整性不受影响 —— go.sum 已钉住全部依赖，go mod download 仍逐个校验
+# 哈希（失败即报 checksum mismatch），GOSUMDB 只影响「新模块首次入 go.sum」这一场景。
+# 需要恢复校验库校验时覆盖：--build-arg GOSUMDB=sum.golang.org
+ARG GOSUMDB=off
+ENV GOPROXY=${GOPROXY} \
+    GOSUMDB=${GOSUMDB}
+# 依赖层独立缓存：只在 go.mod/go.sum 变动时重新下载；--mount 的模块缓存跨构建复用。
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY . .
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \

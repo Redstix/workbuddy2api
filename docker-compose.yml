@@ -2,12 +2,13 @@ services:
   wb2api:
     build:
       context: .
-      args:
-        # 可选：Go 模块代理。官方 proxy.golang.org 在中国大陆不可达 —— 构建第一步
-        # 就是 `go mod download`，会长时间卡在这一层（看着像构建挂了），有时直接失败。
-        # 国内构建填 https://goproxy.cn,direct（或 https://mirrors.aliyun.com/goproxy/）。
-        # 留空 = 官方默认，行为与上游原版一致。
-        GOPROXY: ""
+      # Go 模块代理由 Dockerfile 的 ARG 默认值提供（默认 https://goproxy.cn,direct），
+      # 这里不再写死 —— 原来那行 `GOPROXY: ""` 会覆盖掉默认值，让构建回落到 Go 自带的
+      # proxy.golang.org（国内不可达），等于把默认值废掉。
+      # 需要换成官方代理或镜像站时，在此取消注释并覆盖（别给空值）：
+      # args:
+      #   GOPROXY: https://proxy.golang.org,direct
+      #   GOSUMDB: sum.golang.org
     container_name: workbuddy2api
     restart: unless-stopped
     environment:
