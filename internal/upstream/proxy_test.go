@@ -10,6 +10,7 @@
 package upstream
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -164,12 +165,14 @@ func TestProxyUnreachableFailsWithoutDirectFallback(t *testing.T) {
 }
 
 // TestProxyOnFailureDirectFallsBack 调试开关 proxy.on_failure="direct" 生效：
-// 代理构造失败时退回直连。
+// 代理**构造失败**时退回直连。
 //
-// 这条分支只在本地调试（没起 mihomo）时用，但必须被测试覆盖——它的存在意义就是
-// 「显式选择接受风险」，而如果它其实不生效（比如字段没接线到 upstream.Client），
-// 调试的人会以为是代理配错了，浪费在错误的方向上。注意它只影响「构造失败」这种
-// 早失败；代理可达但连不通仍会走代理路径并自然报错（这才是直连 vs 代理的真实区别）。
+// 注意它只覆盖「构造期失败」（地址解析不出来，如漏写 scheme）。代理地址合法但
+// 运行期连不通时**不会**回退——那条路径在 hc.Do() 内部，没有 fallback 分支
+// （见 TestProxyUnreachableFailsWithoutDirectFallback 与 README 的措辞更正）。
+// 所以这个开关不是「本地没起 mihomo 也能跑通」的容灾开关，别照着那个理解去用。
+// 它必须被测试覆盖的理由是：如果它其实不生效（比如字段没接线到 upstream.Client），
+// 调试的人会以为是代理配错了，浪费在错误的方向上。
 func TestProxyOnFailureDirectFallsBack(t *testing.T) {
 	var directHits int32
 	c := &Client{
@@ -313,6 +316,13 @@ func TestProxyTransportKeepsHardening(t *testing.T) {
 	if tr.ResponseHeaderTimeout != responseHeaderTimeout {
 		t.Errorf("ResponseHeaderTimeout=%v want %v", tr.ResponseHeaderTimeout, responseHeaderTimeout)
 	}
+	// TLSHandshakeTimeout 单独断言：它是「握手阶段卡死」的唯一护栏（对端 SYN 通、
+	// TLS 不回话时，只有它会掐断），而 Transport 的其余超时都在握手之后才生效。
+	// 漏了这条，把代理分支的握手超时改成 99s 也不会有任何测试变红——直连侧
+	// client_test.go 有这条断言，代理侧同样不能少。
+	if tr.TLSHandshakeTimeout != tlsHandshakeTimeout {
+		t.Errorf("TLSHandshakeTimeout=%v want %v", tr.TLSHandshakeTimeout, tlsHandshakeTimeout)
+	}
 	if tr.MaxIdleConns != maxIdleConns || tr.MaxIdleConnsPerHost != maxIdleConnsPerHost {
 		t.Errorf("pool sizes drifted: %d/%d", tr.MaxIdleConns, tr.MaxIdleConnsPerHost)
 	}
@@ -330,5 +340,134 @@ func TestDirectTransportProxyNil(t *testing.T) {
 	tr := newTransport()
 	if tr.Proxy != nil {
 		t.Error("direct transport must have Proxy == nil (so env vars are ignored)")
+	}
+}
+
+// TestChatWithProxyGoesThroughProxy 聊天 SSE 也必须走账号绑定的代理。
+//
+// 这是本文件**最重要**的一条。`chatClientFor` 与 `clientFor` 是两条独立解析路径，
+// 只测 doJSON（短 RPC）完全覆盖不到聊天——曾经的真实事故形态是：把 chatClientFor
+// 改成恒返回直连，聊天正文全部静默走机房 IP，而仓库里所有测试依然全绿（短 RPC
+// 仍走代理，billing 也正常，只有聊天悄悄换了出口）。泄漏的是聊天正文，不是元数据，
+// 所以这条不能靠「短 RPC 测过就够了」来省。
+//
+// 断言两件事：
+//  1. 假代理收到请求、直连 client 一次都没被调用；
+//  2. chatClientFor 返回的 client 其 Transport 就是代理池里那个对象——防止有人
+//     「解析了代理 client 但 Do 的时候又换回直连」。
+func TestChatWithProxyGoesThroughProxy(t *testing.T) {
+	var proxyHits int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&proxyHits, 1)
+		// 走 HTTP 代理时请求行是绝对 URI，与 doJSON 那条测试同款证据。
+		if !strings.HasPrefix(r.RequestURI, "http://") {
+			t.Errorf("proxy got non-absolute RequestURI %q", r.RequestURI)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"ok\":1}\n\n")
+	}))
+	defer proxy.Close()
+
+	var directHits int32
+	c := &Client{
+		HTTP:           proxyDirectCounter(&directHits, `{}`),
+		ChatHTTP:       proxyDirectCounter(&directHits, `{}`),
+		ChatBaseCN:     "https://chat.example",
+		ChatBaseGlobal: "http://target.invalid",
+		BillingBaseCN:  "https://billing.example",
+		GlobalEnabled:  true,
+	}
+	a := proxyGlobalAcct(proxy.URL)
+
+	// 先单独锁「解析出来的 client 属于代理池」：这一层不依赖网络，能直接定位
+	// 「解析对但用错」的问题。
+	hc, err := c.chatClientFor(a)
+	if err != nil {
+		t.Fatalf("chatClientFor: %v", err)
+	}
+	if hc == nil {
+		t.Fatal("chatClientFor returned nil client for global+proxy account")
+	}
+	if hc.Transport == nil {
+		t.Fatal("chat client has nil Transport")
+	}
+	// 先比 *http.Client 指针（可比较），再比 Transport：直接比 Transport 在变异体
+	// 下会撞上不可比较的 rtFunc 而 panic，把「测试失败」变成「测试崩掉」，掩盖真正
+	// 的断言。指针不同就直接停下，也省掉无意义的下一次比较。
+	if hc == c.chatHTTP() {
+		t.Fatal("chat client IS the direct client — chat would leak to the machine IP")
+	}
+	pc, err := c.proxyClientFor(proxy.URL)
+	if err != nil {
+		t.Fatalf("proxyClientFor: %v", err)
+	}
+	if hc != pc.chatHTTP {
+		t.Fatalf("chat client is not the pooled proxy client for this addr")
+	}
+	if hc.Transport != pc.chatHTTP.Transport {
+		t.Errorf("chat client transport is not the pooled proxy transport")
+	}
+
+	rc, status, _, err := c.ChatStreamContext(context.Background(), a, []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "r"})
+	if err == nil {
+		io.Copy(io.Discard, rc)
+		rc.Close()
+	}
+	if got := atomic.LoadInt32(&proxyHits); got != 1 {
+		t.Errorf("proxy hits=%d want 1 (chat did not go through the bound proxy)", got)
+	}
+	if got := atomic.LoadInt32(&directHits); got != 0 {
+		t.Errorf("direct hits=%d want 0 (chat must never fall back to the machine IP)", got)
+	}
+	if status != 200 {
+		t.Errorf("status=%d want 200", status)
+	}
+}
+
+// TestProxyOKUpstream4xxIsNotAProxyError 代理连得通、上游自己返回 4xx → 照常分类。
+//
+// 代理这一层新增了两类失败（连不上代理、代理拒绝 CONNECT），它们与「上游返回 403」
+// 必须分得清：前者说明出口坏了（不该罚号，换代理/报障），后者说明账号被风控
+// （该罚号、该轮转）。混在一起会让风控 403 被当成网络抖动忽略，或者反过来把
+// 代理故障算到账号头上。
+//
+// 这条锁住的是「代理通 + 4xx 走原有 Classify 路径」：返回 *Error（Kind=ErrClient、
+// Status=403），不是普通 error。
+func TestProxyOKUpstream4xxIsNotAProxyError(t *testing.T) {
+	var proxyHits int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&proxyHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"code":403,"msg":"forbidden by risk control"}`)
+	}))
+	defer proxy.Close()
+
+	var directHits int32
+	c := &Client{
+		HTTP:          proxyDirectCounter(&directHits, `{"code":0,"msg":"ok","data":{}}`),
+		ChatBaseCN:    "https://chat.example",
+		BillingBaseCN: "https://billing.example",
+	}
+	req, _ := http.NewRequest(http.MethodGet, "http://target.invalid/v2/probe", nil)
+	_, err := c.doJSON(proxyGlobalAcct(proxy.URL), req)
+	if err == nil {
+		t.Fatal("want error for upstream 403, got nil")
+	}
+	if got := atomic.LoadInt32(&proxyHits); got != 1 {
+		t.Errorf("proxy hits=%d want 1", got)
+	}
+	if got := atomic.LoadInt32(&directHits); got != 0 {
+		t.Errorf("direct hits=%d want 0", got)
+	}
+	ue, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("upstream 403 must surface as *upstream.Error (so handler can penalise), got %T: %v", err, err)
+	}
+	if ue.Status != http.StatusForbidden {
+		t.Errorf("Status=%d want 403", ue.Status)
+	}
+	if ue.Kind != ErrClient {
+		t.Errorf("Kind=%v want ErrClient (proxy worked; this is the upstream judging the account)", ue.Kind)
 	}
 }
