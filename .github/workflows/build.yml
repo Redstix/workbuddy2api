@@ -56,11 +56,20 @@ jobs:
             ${{ steps.image.outputs.name }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # runner 在海外，Dockerfile 的默认值（goproxy.cn）是为国内构建准备的，
+          # 在这里反而是绕路。显式覆盖回官方代理：GitHub runner 直连 proxy.golang.org
+          # 最快，且 GOSUMDB 也走官方校验库（goproxy.cn 虽也代理 sumdb，但多一跳）。
+          build-args: |
+            GOPROXY=https://proxy.golang.org,direct
+            GOSUMDB=sum.golang.org
 
       # 额外导出 amd64 离线 tar.gz：NAS 拉不到 ghcr 时用 artifact 部署。
+      # build-arg 同上一步：本步是独立的一次 buildx 调用，不继承上面的 with: 块。
       - name: Export offline tarball (amd64)
         run: |
           docker buildx build --platform linux/amd64 --file Dockerfile \
+            --build-arg GOPROXY=https://proxy.golang.org,direct \
+            --build-arg GOSUMDB=sum.golang.org \
             --tag wb2api:offline --output type=docker,dest=wb2api-amd64.tar .
           gzip -f wb2api-amd64.tar
 
