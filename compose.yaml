@@ -1,0 +1,22 @@
+services:
+  wb2api:
+    # 生产部署用预构建镜像（不在生产机重跑 build，避免 goproxy 长时间卡顿与
+    # 构建期占用 CPU）。镜像由 e0d7142 源码构建：
+    #   docker build --build-arg GOPROXY=https://goproxy.cn,direct \
+    #     -t workbuddy2api-wb2api:e0d7142 .
+    image: workbuddy2api-wb2api:5e34374
+    container_name: workbuddy2api
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "7863:7863"
+    volumes:
+      - ./auths:/app/auths
+      - ./data:/app/data
+      - ./config.json:/app/config.json:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

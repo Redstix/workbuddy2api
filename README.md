@@ -261,6 +261,45 @@ curl -s http://localhost:7863/healthz
 > docker compose exec -it wb2api bash -c './login.sh' && docker compose restart wb2api
 > ```
 
+### 两个 compose 文件（生产 vs 本地开发）
+
+仓库根有两个 compose 文件，**用途不同，不要混用**：
+
+| 文件 | 用途 | 镜像来源 | 裸 `docker compose` 是否读它 |
+|---|---|---|---|
+| `compose.yaml` | **生产部署** | 预构建镜像（`image:`），生产机不构建 | ✅ 读这个 |
+| `docker-compose.yml` | 本地开发 / 源码构建 | `build:` 段现场构建 | ❌ 不读 |
+
+Docker Compose v2 的默认文件查找按优先级从高到低：`compose.yaml` → `compose.yml` →
+`docker-compose.yaml` → `docker-compose.yml`。所以裸 `docker compose` 自动读 `compose.yaml`
+（生产配置），`docker-compose.yml` 只在你显式 `-f` 时才会用到：
+
+```bash
+# 生产：用预构建镜像起服务
+docker compose up -d
+
+# 本地开发 / 源码构建：必须显式指定 dev 文件
+docker compose -f docker-compose.yml up -d --build
+```
+
+看到这样的 warning **是正常的**，就是优先级规则在工作：
+
+```
+Found multiple config files with supported names: compose.yaml, docker-compose.yml
+Using compose.yaml
+```
+
+**但 warning 一旦变成下面这样，立刻停下来查** —— 说明 `compose.yaml` 不见了，正在读 dev 配置：
+
+```
+Using docker-compose.yml
+```
+
+> ⚠️ **红线**：`compose.yaml` 一旦被删，裸 `docker compose` 会**静默**退化去读
+> `docker-compose.yml` —— 两个文件服务名都叫 `wb2api`、端口都是 `7863`，**不会报任何错**，
+> 但配置是错的（dev 的 `build:` 段 vs 生产的预构建镜像）。所以 `compose.yaml` 必须 tracked，
+> 不能只在某台服务器上存在。
+
 ### 源码构建
 
 ```bash
