@@ -182,7 +182,7 @@ const dumpReqMinBytes = 4 << 20
 type Handler struct {
 	cfg     Config
 	mux     *http.ServeMux
-	degrade degradeGate
+	degrade degradeSet
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
@@ -864,9 +864,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	degradedApplied := false
 	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
 		body = prompt.Rewrite(body, h.cfg.PromptText)
-	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
+	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active(realm) {
 		body = prompt.Append(body, h.cfg.PromptText)
-	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active() {
+	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active(realm) {
 		body = prompt.Rewrite(body, prompt.Degraded)
 		degradedApplied = true
 	}
@@ -935,7 +935,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		keyGroups = ki.Groups
 	}
 
-	for i := 0; i < h.cfg.MaxRotate; i++ {
+	// maxAttempts 轮转预算。默认等于 MaxRotate；降级重试会 +1（见下方
+	// ErrContentBlocked 分支）——降级重试复用同一次轮转名额（delete(tried)/continue），
+	// 如果 400 恰好出现在最后一轮，没有额外预算就会把 400 直接透传给客户端。
+	maxAttempts := h.cfg.MaxRotate
+	for i := 0; i < maxAttempts; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
@@ -1049,12 +1053,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 第二次仍被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
 			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
 			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
-				h.degrade.Trigger()
+				h.degrade.Trigger(realm)
 				body = prompt.Rewrite(body, prompt.Degraded)
 				degradedApplied = true
 				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
 				releaseHeld()
-				log.Printf("WARN: [server] content-blocked (likely fingerprint false positive) -> degraded prompt retry")
+				// 降级重试单独预留一轮：本次 continue 会消耗一次 i，若这正好是最后一轮，
+				// 重试就没预算了，400 会直接透传给客户端（而重试本来是能过的）。
+				// degradedApplied 保证这行最多执行一次，故上限恒为 MaxRotate+1。
+				maxAttempts++
+				log.Printf("WARN: [server] content-blocked (likely fingerprint false positive) -> degraded prompt retry realm=%s", realm)
 				continue
 			}
 			if kind == upstream.ErrContentBlocked {
@@ -1122,6 +1130,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		// 降级窗口到期后的「试探」成功 → 撤销降级并把退避阶梯归零（下个事故重新从 30m 起）。
+		// 判据是 !degradedApplied：为 false 说明本次用的是客户端原始 system 且上游接受了，
+		// 也就是原始提示词已不再被拦，事故确实结束；为 true 说明这次成功靠的是 Degraded
+		// 中性提示词，上游对原始 system 的拦截仍在，阶梯必须保留（否则每次降级期内的
+		// 成功都会把阶梯清零，退避永远升不上去）。
+		// 放在 NoteSuccess 之后：「这个号成功了」是更强的既成事实，优先记账。
+		if !degradedApplied {
+			h.degrade.ResetBackoff(realm)
+		}
 		// 响应头透出实际服务的账号：上游选号对客户端原本完全不可见——管理面板
 		// 的网关据此把每次成功请求记到账号名下（按账号的消耗统计），排障时也能
 		// 看到「这次是谁在答」。uid 是十六进制 ASCII，可直接进响应头；昵称可能

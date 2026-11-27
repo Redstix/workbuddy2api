@@ -1968,8 +1968,8 @@ func TestContentBlockedStickyDegraded(t *testing.T) {
 	}
 	// 降级粘性：新请求 Active()=true，body 已被 Rewrite(Degraded)，上游首字节即 200。
 	// 但 fake 上游只对 firstCall 返回 400，之后都 200，无法区分"直达"与"重试"。
-	// 用 degrade.Active() 直接断言粘性生效。
-	if !h.degrade.Active() {
+	// 用 degrade.Active("cn") 直接断言粘性生效。
+	if !h.degrade.Active("cn") {
 		t.Fatal("degrade should be active after trigger")
 	}
 }
@@ -1998,7 +1998,7 @@ func TestContentBlockedCustomModeDoesNotDegrade(t *testing.T) {
 	if !strings.Contains(body, "blocked by security policy") || !strings.Contains(body, "11128") {
 		t.Errorf("want upstream raw body passthrough in message: %s", body)
 	}
-	if h.degrade.Active() {
+	if h.degrade.Active("cn") {
 		t.Error("degrade should NOT be active in custom mode")
 	}
 }
@@ -2373,12 +2373,13 @@ func TestNewHandlerPromptDefaultPassthrough(t *testing.T) {
 }
 
 // TestContentBlockedCustomIgnoresActiveDegrade 显式 custom 模式在降级期仍走自有提示词、
-// 不参与降级：先人为触发 degrade.Active()（模拟 passthrough 首遇后进入降级期），
+// 不参与降级：先人为触发 degrade.Active("cn")（模拟 passthrough 首遇后进入降级期），
 // 再发 custom 请求 → 出站 body 为自有提示词而非 Degraded，且仍不经降级重试。
 //
-// 相交矩阵关键格：degrade gate 是 Handler 级全局状态（handler.go:69），passthrough
-// 请求可能在不经意间把整实例带入降级期。守卫在 handler.go:450-455 的 if/elseif 结构：
-// custom 分支恒优先，Active() 只在 passthrough 分支才被求值 → custom 请求永远
+// 相交矩阵关键格：degrade gate 现在按 realm 拆（handler.go 的 degradeSet），
+// 但同一 realm 内仍是共享状态（degradeGate 是 Handler 级、进程内），passthrough
+// 请求可能在不经意间把该 realm 带入降级期。守卫在 handler.go 的 if/elseif 结构：
+// custom 分支恒优先，Active(realm) 只在 passthrough 分支才被求值 → custom 请求永远
 // 命不中降级分支。此测试把该行为锁死，防未来重构把两分支合并后 custom 被降级期带偏。
 func TestContentBlockedCustomIgnoresActiveDegrade(t *testing.T) {
 	var sentBodies [][]byte
@@ -2400,8 +2401,8 @@ func TestContentBlockedCustomIgnoresActiveDegrade(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "custom", PromptText: customSys})
 
 	// 人为把降级门拨到激活态（模拟 passthrough 首遇 400 后进入降级期）。
-	h.degrade.Trigger()
-	if !h.degrade.Active() {
+	h.degrade.Trigger("cn")
+	if !h.degrade.Active("cn") {
 		t.Fatal("precondition: degrade gate should be active after Trigger")
 	}
 
@@ -2559,7 +2560,7 @@ func TestHandlerAppendDegradedActiveReplaces(t *testing.T) {
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "append", PromptText: "网关人格"})
-	h.degrade.Trigger() // 预置降级期（模拟 append 首遇后进入降级窗口）
+	h.degrade.Trigger("cn") // 预置降级期（模拟 append 首遇后进入降级窗口）
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
@@ -2619,7 +2620,7 @@ func TestHandlerAppendContentBlockedTriggersDegrade(t *testing.T) {
 	if strings.Contains(string(bodies[1]), "原始指纹") {
 		t.Errorf("retry body should not contain original system: %s", bodies[1])
 	}
-	if !h.degrade.Active() {
+	if !h.degrade.Active("cn") {
 		t.Error("degrade should be active after content-blocked trigger in append mode")
 	}
 }
