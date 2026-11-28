@@ -29,7 +29,7 @@ func TestPromAccountCredentialFamilies(t *testing.T) {
 		{label: "bbbbbbbb", realm: "cn", failStreak: 5, needsRelog: true}, // expiresAt/lastWrite 未知
 	}
 
-	out := writePromMetrics(MetricsSnapshot{}, nil, 0, 0, false, nil, creds)
+	out := writePromMetrics(MetricsSnapshot{}, nil, 0, 0, false, nil, creds, nil)
 
 	for _, fam := range []string{
 		"wb2api_account_token_expires_seconds",
@@ -72,12 +72,12 @@ func TestPromAccountCredentialFamilies(t *testing.T) {
 	}
 
 	// 稳定输出：同输入两次渲染逐字节相等（本文件对确定性输出的既有要求）。
-	if again := writePromMetrics(MetricsSnapshot{}, nil, 0, 0, false, nil, creds); again != out {
+	if again := writePromMetrics(MetricsSnapshot{}, nil, 0, 0, false, nil, creds, nil); again != out {
 		t.Error("两次渲染输出不一致（输出不稳定）")
 	}
 
 	// 乱序输入仍按 account 字典序输出（不依赖调用方顺序）
-	rev := writePromMetrics(MetricsSnapshot{}, nil, 0, 0, false, nil, []promAccountCred{creds[1], creds[0]})
+	rev := writePromMetrics(MetricsSnapshot{}, nil, 0, 0, false, nil, []promAccountCred{creds[1], creds[0]}, nil)
 	ia := strings.Index(rev, `wb2api_account_needs_relogin{account="aaaaaaaa"`)
 	ib := strings.Index(rev, `wb2api_account_needs_relogin{account="bbbbbbbb"`)
 	if ia < 0 || ib < 0 || ia > ib {

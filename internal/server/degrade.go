@@ -148,6 +148,9 @@ func (s *degradeSet) Trigger(realm string) { s.forRealm(realm).Trigger() }
 // ResetBackoff 撤销该 realm 的降级并把退避阶梯归零。
 func (s *degradeSet) ResetBackoff(realm string) { s.forRealm(realm).ResetBackoff() }
 
+// noteWarn 该 realm 的降级期 WARN 限流：每分钟最多一条，返回是否该打。
+func (s *degradeSet) noteWarn(realm string) bool { return s.forRealm(realm).noteWarn() }
+
 // Snapshot 各 realm 的降级状态快照，供 /healthz 与 /metrics。
 //
 // 恒输出 cn / global 两个键（即使都为 false）：运维要能稳定断言「字段在且为

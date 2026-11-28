@@ -382,6 +382,11 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 		"total":          total,
 		"service":        ServiceName,
 		"realm_servable": realmServable,
+		// degraded 各 realm 的降级期状态：恒输出 cn/global 两个键（缺键与 false
+		// 在告警规则里分不清，运维要能稳定断言字段存在且为 false）。
+		// 降级期意味着出站提示词已被替换成中性版，请求仍通但语义已降级——
+		// 这段状态此前对外完全不可见，是「42% 时间在替换态却没人发现」的根因之一。
+		"degraded": h.degrade.Snapshot(),
 	})
 }
 
@@ -869,6 +874,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active(realm) {
 		body = prompt.Rewrite(body, prompt.Degraded)
 		degradedApplied = true
+		// 降级期观测：每分钟首次进降级分支打一条 WARN。此前降级期一条日志都没有，
+		// 是「42% 时间在替换态却没人发现」的主因。request 级频繁落在这里，必须限流。
+		if h.degrade.noteWarn(realm) {
+			log.Printf("WARN: [server] serving in DEGRADED prompt mode realm=%s (neutral prompt replaced client system; upstream content block window)", realm)
+		}
 	}
 
 	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，

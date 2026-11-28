@@ -180,7 +180,7 @@ func promPoolStateValue(h pool.RealmHealth, state string) int {
 
 // writePromMetrics 生成完整 exposition 文本。纯函数（无 IO、无时间读取），
 // 便于测试用固定输入做逐行断言。
-func writePromMetrics(snap MetricsSnapshot, health []promRealmHealth, stickySessions int, costExploreEvents int64, wafActive bool, tasks map[string]taskledger.Run, creds []promAccountCred) string {
+func writePromMetrics(snap MetricsSnapshot, health []promRealmHealth, stickySessions int, costExploreEvents int64, wafActive bool, tasks map[string]taskledger.Run, creds []promAccountCred, degraded map[string]bool) string {
 	w := newPromWriter()
 
 	// ---------- 账号池（realm 维度） ----------
@@ -209,6 +209,14 @@ func writePromMetrics(snap MetricsSnapshot, health []promRealmHealth, stickySess
 
 	w.family("wb2api_waf_ip_block_active", "IP 级 WAF 拦截是否处于激活期（1=激活）。进程内状态，重启清零。", "gauge")
 	w.sample("wb2api_waf_ip_block_active", boolToFloat(wafActive))
+
+	// 降级期状态：出站提示词是否已被替换成中性版。1 = 该 realm 正在降级。
+	// 恒输出 cn/global 两条（即使都是 0）：缺序列和 0 在告警规则里分不清——
+	// 「wb2api_degrade_active == 1」在序列缺失时恒不触发，会静默漏报。
+	w.family("wb2api_degrade_active", "该 realm 是否处于降级期（出站提示词已替换为中性版，1=降级中）。进程内状态，重启清零。", "gauge")
+	for _, realm := range []string{"cn", "global"} {
+		w.sample("wb2api_degrade_active", boolToFloat(degraded[realm]), "realm", realm)
+	}
 
 	// ---------- 定时任务台账（taskledger） ----------
 	//
@@ -412,5 +420,5 @@ func (h *Handler) promMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	_, _ = w.Write([]byte(writePromMetrics(snap, health, sticky, exploreEvents, h.wafIP.active(), tasks, creds)))
+	_, _ = w.Write([]byte(writePromMetrics(snap, health, sticky, exploreEvents, h.wafIP.active(), tasks, creds, h.degrade.Snapshot())))
 }
