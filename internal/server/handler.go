@@ -182,6 +182,10 @@ const dumpReqMinBytes = 4 << 20
 type Handler struct {
 	cfg     Config
 	mux     *http.ServeMux
+	// degrade 按 realm 隔离的降级状态机（degrade.go）。
+	// 注意：设计文档 §5.4 曾计划在 cmd/server/main.go 接线注入，经复核不需要——
+	// degradeSet 全在 Handler 内、退避阶梯与 realm 集合都是内置常量，没有可注入的
+	// 配置项。在 main.go 加一行赋值只会是假接线（看着接上了其实什么都不传）。
 	degrade degradeSet
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
