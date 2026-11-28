@@ -180,8 +180,8 @@ const dumpReqMinBytes = 4 << 20
 
 // Handler 主路由。
 type Handler struct {
-	cfg     Config
-	mux     *http.ServeMux
+	cfg Config
+	mux *http.ServeMux
 	// degrade 按 realm 隔离的降级状态机（degrade.go）。
 	// 注意：设计文档 §5.4 曾计划在 cmd/server/main.go 接线注入，经复核不需要——
 	// degradeSet 全在 Handler 内、退避阶梯与 realm 集合都是内置常量，没有可注入的

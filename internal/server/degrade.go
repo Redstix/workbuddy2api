@@ -90,11 +90,16 @@ func (g *degradeGate) Trigger() {
 //
 // backoff 必须归 0 而不是回到 30m：归 30m 的话下次 Trigger 走「已有退避 → 翻倍」
 // 分支，一个新事故的第一个窗口就是 60m。归 0 才能让新事故从阶梯第一级开始。
+//
+// lastWarn 一并清零：限流是「同一场事故不刷屏」的手段，不是跨事故的配额。
+// 不清的话，新事故在前一场事故最后一分钟 WARN 后的 60 秒内触发时，第一条
+// WARN 会被上一场的限流吃掉，新事故的头一分钟反而静默——正是要避免的情形。
 func (g *degradeGate) ResetBackoff() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.backoff = 0
 	g.until = time.Time{}
+	g.lastWarn = time.Time{}
 }
 
 // noteWarn 降级期日志限流：距上次 WARN 满一分钟才允许再打一条，返回是否该打。
