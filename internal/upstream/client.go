@@ -1071,10 +1071,15 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 出站角色归一：先把所有 system/developer 重贴成 user（11-128 按 role 判定，
+	// system/developer 角色被拦、user 角色放行且内容全量送达），再在最前面补一条
+	// 中性 system（global 域要求首条必须是 system）。两步顺序不可交换，详见 relabel.go。
+	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	prepared = NormalizeSystemRoles(prepared)
 	// ensureConsoleSystem 在 prepareBody 后统一套用全局脚本：首条消息非 system 时前置
 	// 兜底 system（防 console 域上游 code 11-128；#119 后 global 出站固定 /v2，
 	// 该兜底保留——上游对 /v2 是否需要 system 无实测反证，删了无回滚路径）。
-	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	// NormalizeSystemRoles 之后首条恒为 system，故这里实际不会再触发（旧有回滚路径保留）。
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}

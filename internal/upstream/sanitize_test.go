@@ -324,7 +324,21 @@ func TestChatStreamWireBodyCodexInstructionsSanitized(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &obj); err != nil {
 		t.Fatalf("wire body not json: %v", err)
 	}
-	sys, _ := obj["messages"].([]any)[0].(map[string]any)["content"].(string)
+	// 出站形态已变为 [中性 system 头, 净化后的原 system(角色 user), user]，
+	// 净化内容落在 messages[1]，原始 user 顺延到 messages[2]。
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("wire messages=%d want 3 (neutral head + sanitized body + user)", len(msgs))
+	}
+	head, _ := msgs[0].(map[string]any)
+	if head["role"] != "system" || head["content"] != neutralSystemContent {
+		t.Errorf("wire head=%v/%v want system/%q", head["role"], head["content"], neutralSystemContent)
+	}
+	body0, _ := msgs[1].(map[string]any)
+	sys, _ := body0["content"].(string)
+	if body0["role"] != "user" {
+		t.Errorf("sanitized body role=%v want user (system roles are relabeled)", body0["role"])
+	}
 	if strings.Contains(sys, codexInstructions) ||
 		strings.Contains(sys, "in the Codex CLI, a terminal-based coding assistant.") {
 		t.Errorf("wire body still contains codex fingerprint: %q", sys)
@@ -332,7 +346,7 @@ func TestChatStreamWireBodyCodexInstructionsSanitized(t *testing.T) {
 	if !strings.Contains(sys, "running in the Codex CLI tool, a terminal-based") {
 		t.Errorf("codex rewrite missing on wire: %q", sys)
 	}
-	user, _ := obj["messages"].([]any)[1].(map[string]any)["content"].(string)
+	user, _ := msgs[2].(map[string]any)["content"].(string)
 	if user != "say ok" {
 		t.Errorf("user message altered: %q", user)
 	}

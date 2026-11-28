@@ -2206,24 +2206,33 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	if !strings.Contains(out, "Default branch (you will usually use this for PRs)") {
 		t.Errorf("sanitized branch rewrite missing: %s", out)
 	}
-	// 2) messages 头部恰好一条 system = 自有提示词（Rewrite 已删旧 system）。
+	// 2) 出站形态：恰好一条 system = 中性头；自有提示词被重贴为 user（11-128 按 role 判定）。
 	var obj map[string]any
 	if err := json.Unmarshal(sentBody, &obj); err != nil {
 		t.Fatalf("out body not json: %v %s", err, out)
 	}
 	msgs := obj["messages"].([]any)
-	var systemCount int
+	var systemCount, customCount int
 	for _, m := range msgs {
 		mm := m.(map[string]any)
 		if mm["role"] == "system" {
 			systemCount++
-			if mm["content"] != customSys {
-				t.Errorf("system content=%v want %q", mm["content"], customSys)
+			if mm["content"] != "You are a helpful assistant." {
+				t.Errorf("system content=%v want neutral head", mm["content"])
+			}
+		}
+		if mm["content"] == customSys {
+			customCount++
+			if mm["role"] != "user" {
+				t.Errorf("custom prompt role=%v want user (system roles are relabeled)", mm["role"])
 			}
 		}
 	}
 	if systemCount != 1 {
-		t.Errorf("want exactly 1 system message, got %d (all=%v)", systemCount, msgs)
+		t.Errorf("want exactly 1 system message (neutral head), got %d (all=%v)", systemCount, msgs)
+	}
+	if customCount != 1 {
+		t.Errorf("want custom prompt appear exactly once, got %d (all=%v)", customCount, msgs)
 	}
 }
 
@@ -2355,20 +2364,29 @@ func TestNewHandlerPromptDefaultPassthrough(t *testing.T) {
 	}
 	msgs, _ := obj["messages"].([]any)
 	if len(msgs) < 2 {
-		t.Fatalf("expected >=2 messages (system kept + user kept), got %d: %s", len(msgs), out)
+		t.Fatalf("expected >=2 messages (neutral head + client system relabeled + user), got %d: %s", len(msgs), out)
 	}
-	sysCount := 0
+	sysCount, clientSysCount := 0, 0
 	for _, m := range msgs {
 		mm, _ := m.(map[string]any)
 		if mm["role"] == "system" {
 			sysCount++
-			if mm["content"] != sys {
-				t.Errorf("system content=%v want %q (no rewrite in default mode)", mm["content"], sys)
+			if mm["content"] != "You are a helpful assistant." {
+				t.Errorf("system content=%v want neutral head", mm["content"])
+			}
+		}
+		if mm["content"] == sys {
+			clientSysCount++
+			if mm["role"] != "user" {
+				t.Errorf("client system role=%v want user (passthrough keeps content, relabel changes role)", mm["role"])
 			}
 		}
 	}
 	if sysCount != 1 {
-		t.Errorf("system count=%d want 1 (passthrough keeps client system exactly once)", sysCount)
+		t.Errorf("system count=%d want 1 (neutral head only)", sysCount)
+	}
+	if clientSysCount != 1 {
+		t.Errorf("client system content count=%d want 1 (kept verbatim, role relabeled)", clientSysCount)
 	}
 }
 
@@ -2529,23 +2547,28 @@ func TestHandlerAppendEndToEnd(t *testing.T) {
 		t.Fatalf("unmarshal: %v body=%s", err, bodies[0])
 	}
 	msgs := obj["messages"].([]any)
-	if len(msgs) != 4 {
-		t.Fatalf("messages len=%d want 4: %s", len(msgs), bodies[0])
+	// 出站形态：[中性 system 头, 项目规范(user), 工具约定(user), 网关人格(user), 你好(user)]。
+	// 追加顺序不变，只是所有 system/developer 角色被重贴为 user，并在最前面补一条中性头。
+	if len(msgs) != 5 {
+		t.Fatalf("messages len=%d want 5: %s", len(msgs), bodies[0])
 	}
-	// 原始 system/developer 逐字在场。
-	if msgs[0].(map[string]any)["content"] != "项目规范" {
+	if head := msgs[0].(map[string]any); head["role"] != "system" {
+		t.Errorf("head role=%v want system", head["role"])
+	}
+	// 原始 system/developer 内容逐字在场（角色已变 user）。
+	if msgs[1].(map[string]any)["content"] != "项目规范" {
 		t.Errorf("original system missing: %s", bodies[0])
 	}
-	if msgs[1].(map[string]any)["content"] != "工具约定" {
+	if msgs[2].(map[string]any)["content"] != "工具约定" {
 		t.Errorf("original developer missing: %s", bodies[0])
 	}
 	// GW 紧跟开头块。
-	gw := msgs[2].(map[string]any)
-	if gw["role"] != "system" || gw["content"] != "网关人格" {
+	gw := msgs[3].(map[string]any)
+	if gw["role"] != "user" || gw["content"] != "网关人格" {
 		t.Errorf("GW msg wrong: %v", gw)
 	}
 	// user 不动。
-	if msgs[3].(map[string]any)["content"] != "你好" {
+	if msgs[4].(map[string]any)["content"] != "你好" {
 		t.Errorf("user content changed: %s", bodies[0])
 	}
 }

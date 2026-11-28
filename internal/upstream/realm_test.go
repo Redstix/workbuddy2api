@@ -211,9 +211,24 @@ func TestCNChatPathUnchanged(t *testing.T) {
 	if gotPath != "/v2/chat/completions" {
 		t.Errorf("cn chat path=%q", gotPath)
 	}
-	// 零回归：body 不因 ensureConsoleSystem 注入 system。
-	if bytes.Contains([]byte(gotMsgsJSON), []byte(`"system"`)) {
-		t.Errorf("cn chat body should not be modified with system fallback: %s", gotMsgsJSON)
+	// 出站形态：恰好一条中性 system 头（global 域要求首条是 system），其后为原 user。
+	var wire struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(gotMsgsJSON), &wire); err != nil {
+		t.Fatalf("wire body not json: %v", err)
+	}
+	if len(wire.Messages) != 2 {
+		t.Fatalf("cn chat outbound messages=%d want 2 (neutral head + user): %s", len(wire.Messages), gotMsgsJSON)
+	}
+	if wire.Messages[0].Role != "system" || wire.Messages[0].Content != neutralSystemContent {
+		t.Errorf("cn chat head=%v/%v want system/%q", wire.Messages[0].Role, wire.Messages[0].Content, neutralSystemContent)
+	}
+	if wire.Messages[1].Role != "user" || wire.Messages[1].Content != "hi" {
+		t.Errorf("cn chat user msg=%v/%v want user/hi", wire.Messages[1].Role, wire.Messages[1].Content)
 	}
 }
 

@@ -119,8 +119,8 @@ func TestChatRealmSelectionAndBodyRewrite(t *testing.T) {
 	if gotPath != "/v2/chat/completions" {
 		t.Errorf("global chat path=%q want /v2/chat/completions", gotPath)
 	}
-	if gotMsgs != 2 { // ensureConsoleSystem：user 前置补 system
-		t.Errorf("global chat messages=%d want 2 (system fallback)", gotMsgs)
+	if gotMsgs != 2 { // 中性 system 头 + 原 user
+		t.Errorf("global chat messages=%d want 2 (neutral head + user)", gotMsgs)
 	}
 
 	// 裸名请求（CN 零回归）
@@ -145,8 +145,8 @@ func TestChatRealmSelectionAndBodyRewrite(t *testing.T) {
 	if gotPath != "/v2/chat/completions" {
 		t.Errorf("cn chat path=%q want /v2/chat/completions", gotPath)
 	}
-	if gotMsgs != 1 { // CN 不补 system
-		t.Errorf("cn chat messages=%d want 1 (no system fallback)", gotMsgs)
+	if gotMsgs != 2 { // 中性 system 头 + 原 user（与 realm 无关，两个域形态一致）
+		t.Errorf("cn chat messages=%d want 2 (neutral head + user)", gotMsgs)
 	}
 }
 
